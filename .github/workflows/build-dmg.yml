@@ -1,0 +1,365 @@
+name: Build Bitcoin Puzzle Solver DMG with BitCrack
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+  APP_NAME: 'BitcoinPuzzleSolver'
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Verify source files
+      run: |
+        echo "=== Repository contents ==="
+        ls -la
+        
+        echo ""
+        echo "=== Checking for src directory ==="
+        if [ ! -d "src" ]; then
+          echo "ERROR: src/ directory not found"
+          echo "Please ensure your repository has a src/ directory"
+          exit 1
+        fi
+        echo "✓ src/ directory found"
+        
+        echo ""
+        echo "=== src/ directory contents ==="
+        ls -la src/
+        
+        echo ""
+        echo "=== Checking for gui.py ==="
+        if [ ! -f "src/gui.py" ]; then
+          echo "ERROR: src/gui.py not found"
+          echo "Please add gui.py to the src/ directory"
+          exit 1
+        fi
+        echo "✓ src/gui.py found"
+        
+        echo ""
+        echo "=== Source files verified ==="
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python3 -m pip install --upgrade pip
+        pip install PyQt6 ecdsa base58 requests flask qrcode Pillow
+    
+    - name: Build BitCrack
+      continue-on-error: true
+      id: bitcrack
+      run: |
+        brew install cmake
+        
+        # Detect architecture
+        ARCH=$(uname -m)
+        echo "Building on architecture: $ARCH"
+        
+        git clone https://github.com/brichard19/BitCrack.git
+        cd BitCrack
+        mkdir -p build
+        cd build
+        
+        # Build for current architecture
+        if [[ "$ARCH" == "arm64" ]]; then
+          echo "Configuring for Apple Silicon (ARM64)"
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+                   -DUSE_OPENCL=ON \
+                   -DCMAKE_OSX_ARCHITECTURES=arm64 \
+                   -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+        else
+          echo "Configuring for Intel (x86_64)"
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+                   -DUSE_OPENCL=ON \
+                   -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+                   -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+        fi
+        
+        make -j$(sysctl -n hw.ncpu)
+        
+        if [ -f "clBitCrack" ]; then
+          mkdir -p ../../bin
+          cp clBitCrack ../../bin/
+          
+          # Mark which architecture this was built for
+          echo "$ARCH" > ../../bin/ARCHITECTURE.txt
+          
+          echo "OK=1" >> $GITHUB_OUTPUT
+          echo "BitCrack built successfully for $ARCH"
+          
+          # Verify binary architecture
+          file ../../bin/clBitCrack
+          lipo -info ../../bin/clBitCrack 2>/dev/null || echo "Not a universal binary"
+        else
+          echo "BitCrack build failed - continuing without GPU support"
+        fi
+    
+    - name: Create installer files
+      run: |
+        mkdir -p installer
+        if [ -f "scripts/Install-BitCrack.command" ]; then
+          cp scripts/Install-BitCrack.command installer/
+          cp scripts/BitCrack-README.txt installer/ 2>/dev/null || true
+        fi
+        if [ -f "bin/clBitCrack" ]; then
+          cp bin/clBitCrack installer/
+        fi
+        if [ -f "installer/Install-BitCrack.command" ]; then
+          chmod +x installer/Install-BitCrack.command
+        fi
+        echo "Installer files prepared"
+    
+    - name: Create app bundle
+      run: |
+        mkdir -p "build/$APP_NAME.app/Contents/MacOS"
+        mkdir -p "build/$APP_NAME.app/Contents/Resources"
+        
+        cp -r src/* "build/$APP_NAME.app/Contents/Resources/"
+        
+        echo '<?xml version="1.0" encoding="UTF-8"?>' > "build/$APP_NAME.app/Contents/Info.plist"
+        echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '<plist version="1.0">' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '<dict>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '    <key>CFBundleExecutable</key>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '    <string>BitcoinPuzzleSolver</string>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '    <key>CFBundleIdentifier</key>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '    <string>com.btc.solver</string>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '    <key>CFBundleName</key>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '    <string>Bitcoin Puzzle Solver</string>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '    <key>CFBundleVersion</key>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '    <string>1.0.0</string>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '</dict>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        echo '</plist>' >> "build/$APP_NAME.app/Contents/Info.plist"
+        
+        echo '#!/bin/bash' > "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '# Bitcoin Puzzle Solver Launcher' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'DIR="$(dirname "$0")"' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'RESOURCES="$DIR/../Resources"' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'cd "$RESOURCES"' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '# Detect architecture' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'ARCH=$(uname -m)' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'echo "Running on: $ARCH"' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '# Check Python' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'if ! command -v python3 &> /dev/null; then' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '    osascript -e '"'"'display alert "Python 3 Required" message "Please install Python 3.9+ from python.org" buttons {"OK"}'"'"'' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '    exit 1' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'fi' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '# Check Python version' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'PYTHON_VERSION=$(python3 --version 2>&1 | awk '"'"'{print $2}'"'"')' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'PYTHON_MAJOR=$(echo $PYTHON_VERSION | cut -d. -f1)' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'PYTHON_MINOR=$(echo $PYTHON_VERSION | cut -d. -f2)' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'if [ "$PYTHON_MAJOR" -lt 3 ] || [ "$PYTHON_MINOR" -lt 9 ]; then' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '    osascript -e '"'"'display alert "Python 3.9+ Required" message "Your Python version is too old. Please install Python 3.9 or later from python.org" buttons {"OK"}'"'"'' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '    exit 1' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'fi' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '# Install dependencies if needed' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'python3 -c "import PyQt6" 2>/dev/null || {' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '    osascript -e '"'"'display notification "Installing dependencies..." with title "Bitcoin Puzzle Solver"'"'"'' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '    python3 -m pip install --user -q PyQt6 ecdsa base58 requests flask qrcode Pillow 2>/dev/null || true' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '}' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo '# Launch application' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'python3 gui.py 2>&1 | logger -t BitcoinPuzzleSolver' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        
+        chmod +x "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo "App bundle created"
+    
+    - name: Verify app bundle
+      run: |
+        echo "=== Checking build directory ==="
+        ls -la build/ || echo "No build directory"
+        
+        echo ""
+        echo "=== Checking app bundle ==="
+        ls -la "build/$APP_NAME.app" || echo "No app bundle"
+        
+        echo ""
+        echo "=== Checking Contents ==="
+        ls -la "build/$APP_NAME.app/Contents/" || echo "No Contents"
+        
+        echo ""
+        echo "=== Checking MacOS ==="
+        ls -la "build/$APP_NAME.app/Contents/MacOS/" || echo "No MacOS directory"
+        
+        echo ""
+        echo "=== Checking Resources ==="
+        ls -la "build/$APP_NAME.app/Contents/Resources/" || echo "No Resources"
+        
+        echo ""
+        echo "=== Verification ==="
+        if [ ! -f "build/$APP_NAME.app/Contents/Info.plist" ]; then
+          echo "ERROR: Info.plist missing"
+          exit 1
+        fi
+        echo "✓ Info.plist found"
+        
+        if [ ! -x "build/$APP_NAME.app/Contents/MacOS/$APP_NAME" ]; then
+          echo "ERROR: Launcher missing or not executable"
+          ls -la "build/$APP_NAME.app/Contents/MacOS/" || true
+          exit 1
+        fi
+        echo "✓ Launcher found and executable"
+        
+        if [ ! -f "build/$APP_NAME.app/Contents/Resources/gui.py" ]; then
+          echo "ERROR: gui.py missing"
+          ls -la "build/$APP_NAME.app/Contents/Resources/" || true
+          exit 1
+        fi
+        echo "✓ gui.py found"
+        
+        echo ""
+        echo "=== App bundle verified successfully ==="
+    
+    - name: Create DMG
+      run: |
+        echo "=== Creating DMG staging directory ==="
+        mkdir -p dmg
+        
+        echo "=== Copying app bundle ==="
+        cp -r "build/$APP_NAME.app" dmg/
+        ls -la dmg/
+        
+        echo ""
+        echo "=== Checking for installer ==="
+        if [ -d "installer" ] && [ "$(ls -A installer 2>/dev/null)" ]; then
+          echo "Found installer directory with contents"
+          cp -r installer dmg/BitCrack-Installer/
+          echo "✓ BitCrack installer copied"
+        else
+          echo "No installer directory or empty - skipping"
+        fi
+        
+        echo ""
+        echo "=== Creating Applications symlink ==="
+        ln -s /Applications dmg/Applications
+        
+        echo ""
+        echo "=== Creating README ==="
+        echo "Bitcoin Puzzle Solver" > dmg/README.txt
+        echo "=====================" >> dmg/README.txt
+        echo "" >> dmg/README.txt
+        echo "COMPATIBILITY:" >> dmg/README.txt
+        echo "- Apple Silicon (M1/M2/M3) Macs - Fully Supported" >> dmg/README.txt
+        echo "- Intel Macs - Fully Supported" >> dmg/README.txt
+        echo "- macOS 11.0 (Big Sur) or later required" >> dmg/README.txt
+        echo "" >> dmg/README.txt
+        echo "INSTALLATION:" >> dmg/README.txt
+        echo "1. Drag BitcoinPuzzleSolver to Applications folder" >> dmg/README.txt
+        echo "2. (Optional) Run BitCrack-Installer/Install-BitCrack.command" >> dmg/README.txt
+        echo "   Note: BitCrack is architecture-specific" >> dmg/README.txt
+        echo "3. Launch from Applications" >> dmg/README.txt
+        echo "" >> dmg/README.txt
+        echo "FIRST RUN:" >> dmg/README.txt
+        echo "- Right-click app and select Open (macOS security)" >> dmg/README.txt
+        echo "- Wait for dependencies to install (1-2 minutes)" >> dmg/README.txt
+        echo "- Dependencies are automatically installed for your Mac" >> dmg/README.txt
+        echo "" >> dmg/README.txt
+        echo "REQUIREMENTS:" >> dmg/README.txt
+        echo "- macOS 11.0+" >> dmg/README.txt
+        echo "- Python 3.9+" >> dmg/README.txt
+        echo "- 4GB RAM" >> dmg/README.txt
+        echo "- Works on both Intel and Apple Silicon Macs" >> dmg/README.txt
+        echo "" >> dmg/README.txt
+        echo "GPU ACCELERATION:" >> dmg/README.txt
+        echo "- Apple Silicon: Uses Metal/OpenCL" >> dmg/README.txt
+        echo "- Intel: Uses integrated or dedicated GPU" >> dmg/README.txt
+        echo "- BitCrack installer detects your architecture automatically" >> dmg/README.txt
+        echo "" >> dmg/README.txt
+        echo "For more info:" >> dmg/README.txt
+        echo "https://github.com/DeadByDawn101/bitcoin-puzzle-solver" >> dmg/README.txt
+        
+        echo ""
+        echo "=== Determining version ==="
+        VERSION=$(echo ${GITHUB_REF:-refs/tags/v1.0.0} | sed 's|refs/tags/v||' | sed 's|refs/tags/||')
+        echo "Version: $VERSION"
+        DMG_NAME="$APP_NAME-$VERSION-macOS"
+        echo "DMG Name: $DMG_NAME"
+        
+        echo ""
+        echo "=== DMG staging contents ==="
+        ls -la dmg/
+        
+        echo ""
+        echo "=== Creating DMG ==="
+        hdiutil create -volname "Bitcoin Puzzle Solver" -srcfolder dmg -ov -format UDZO "$DMG_NAME.dmg"
+        
+        echo ""
+        echo "=== Checking DMG creation ==="
+        if [ -f "$DMG_NAME.dmg" ]; then
+          echo "✓ DMG created successfully"
+          ls -lh "$DMG_NAME.dmg"
+          
+          echo ""
+          echo "=== Creating checksums ==="
+          shasum -a 256 "$DMG_NAME.dmg" > checksums.txt
+          cat checksums.txt
+          
+          echo ""
+          echo "=== Final file list ==="
+          ls -lh *.dmg checksums.txt
+        else
+          echo "ERROR: DMG creation failed"
+          echo "Looking for any DMG files:"
+          ls -la *.dmg 2>/dev/null || echo "No DMG files found"
+          exit 1
+        fi
+    
+    - name: Upload Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          *.dmg
+          checksums.txt
+        body: |
+          ## Bitcoin Puzzle Solver ${{ github.ref_name }}
+          
+          Complete DMG installer for macOS with optional GPU acceleration.
+          
+          **Installation:**
+          1. Open DMG
+          2. Drag app to Applications
+          3. (Optional) Run BitCrack installer for GPU support
+          
+          **Requirements:**
+          - macOS 11.0+
+          - Python 3.9+
+          - 4GB RAM
+          
+          **Download:** See assets below
+          
+          ---
+          
+          **Repository:** https://github.com/${{ github.repository }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: dmg-build
+        path: |
+          *.dmg
+          checksums.txt
+        retention-days: 30
