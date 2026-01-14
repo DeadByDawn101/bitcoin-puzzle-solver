@@ -1,0 +1,190 @@
+name: Build Bitcoin Puzzle Solver Installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-installers:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: pip install PyQt6 ecdsa base58 requests flask qrcode Pillow
+    
+    - name: Verify source
+      run: |
+        if [ ! -d "src" ] || [ ! -f "src/gui.py" ]; then
+          echo "ERROR: src/gui.py not found!"
+          exit 1
+        fi
+        echo "Source verified"
+    
+    - name: Create app bundle
+      run: |
+        mkdir -p BitcoinPuzzleSolver.app/Contents/MacOS
+        mkdir -p BitcoinPuzzleSolver.app/Contents/Resources
+        
+        echo "Copying source files"
+        cp -r src/* BitcoinPuzzleSolver.app/Contents/Resources/
+        
+        echo "Creating Info.plist"
+        if [ -f "workflow-templates/Info.plist" ]; then
+          cp workflow-templates/Info.plist BitcoinPuzzleSolver.app/Contents/
+        else
+          echo '<?xml version="1.0" encoding="UTF-8"?>' > BitcoinPuzzleSolver.app/Contents/Info.plist
+          echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> BitcoinPuzzleSolver.app/Contents/Info.plist
+          echo '<plist version="1.0"><dict>' >> BitcoinPuzzleSolver.app/Contents/Info.plist
+          echo '<key>CFBundleExecutable</key><string>launcher</string>' >> BitcoinPuzzleSolver.app/Contents/Info.plist
+          echo '<key>CFBundleIdentifier</key><string>com.btc.solver</string>' >> BitcoinPuzzleSolver.app/Contents/Info.plist
+          echo '<key>CFBundleName</key><string>Bitcoin Puzzle Solver</string>' >> BitcoinPuzzleSolver.app/Contents/Info.plist
+          echo '<key>CFBundleVersion</key><string>1.0.0</string>' >> BitcoinPuzzleSolver.app/Contents/Info.plist
+          echo '<key>LSMinimumSystemVersion</key><string>11.0</string>' >> BitcoinPuzzleSolver.app/Contents/Info.plist
+          echo '</dict></plist>' >> BitcoinPuzzleSolver.app/Contents/Info.plist
+        fi
+        
+        echo "Creating launcher"
+        if [ -f "workflow-templates/launcher-improved.sh" ]; then
+          cp workflow-templates/launcher-improved.sh BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+        elif [ -f "workflow-templates/launcher.sh" ]; then
+          cp workflow-templates/launcher.sh BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+        else
+          echo '#!/bin/bash' > BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+          echo 'DIR="$(cd "$(dirname "$0")" && pwd)"' >> BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+          echo 'cd "$DIR/../Resources"' >> BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+          echo 'if ! command -v python3 &> /dev/null; then' >> BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+          echo '  osascript -e '"'"'display alert "Python 3 Required" message "Install from python.org"'"'"'' >> BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+          echo '  exit 1' >> BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+          echo 'fi' >> BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+          echo 'python3 -c "import PyQt6" 2>/dev/null || python3 -m pip install --user -q PyQt6 ecdsa base58 requests flask qrcode Pillow' >> BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+          echo 'python3 gui.py' >> BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+        fi
+        chmod +x BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+        
+        echo "App bundle created"
+        ls -la BitcoinPuzzleSolver.app/Contents/MacOS/launcher
+    
+    - name: Create PKG installer
+      run: |
+        echo "Building PKG installer"
+        
+        mkdir -p pkg-root/Applications
+        cp -r BitcoinPuzzleSolver.app pkg-root/Applications/
+        
+        pkgbuild --root pkg-root \
+                 --identifier com.btc.solver \
+                 --version 1.0.0 \
+                 --install-location / \
+                 BitcoinPuzzleSolver-1.0.0.pkg
+        
+        if [ -f "BitcoinPuzzleSolver-1.0.0.pkg" ]; then
+          echo "PKG created successfully"
+          ls -lh BitcoinPuzzleSolver-1.0.0.pkg
+        else
+          echo "ERROR: PKG creation failed"
+          exit 1
+        fi
+    
+    - name: Create DMG installer
+      run: |
+        echo "Building DMG installer"
+        
+        mkdir dmg-staging
+        cp -r BitcoinPuzzleSolver.app dmg-staging/
+        ln -s /Applications dmg-staging/Applications
+        
+        if [ -f "workflow-templates/README.txt" ]; then
+          cp workflow-templates/README.txt dmg-staging/
+        else
+          echo "Bitcoin Puzzle Solver" > dmg-staging/README.txt
+          echo "" >> dmg-staging/README.txt
+          echo "Installation:" >> dmg-staging/README.txt
+          echo "1. Drag BitcoinPuzzleSolver to Applications folder" >> dmg-staging/README.txt
+          echo "2. Launch from Applications" >> dmg-staging/README.txt
+          echo "3. Right-click and select Open on first launch" >> dmg-staging/README.txt
+          echo "" >> dmg-staging/README.txt
+          echo "Requirements: macOS 11.0+, Python 3.9+" >> dmg-staging/README.txt
+        fi
+        
+        hdiutil create -volname "Bitcoin Puzzle Solver" \
+                       -srcfolder dmg-staging \
+                       -ov \
+                       -format UDZO \
+                       BitcoinPuzzleSolver-1.0.0.dmg
+        
+        if [ -f "BitcoinPuzzleSolver-1.0.0.dmg" ]; then
+          echo "DMG created successfully"
+          ls -lh BitcoinPuzzleSolver-1.0.0.dmg
+        else
+          echo "ERROR: DMG creation failed"
+          exit 1
+        fi
+    
+    - name: Create checksums
+      run: |
+        shasum -a 256 BitcoinPuzzleSolver-1.0.0.pkg > checksums.txt
+        shasum -a 256 BitcoinPuzzleSolver-1.0.0.dmg >> checksums.txt
+        cat checksums.txt
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: bitcoin-puzzle-solver-installers
+        path: |
+          BitcoinPuzzleSolver-1.0.0.pkg
+          BitcoinPuzzleSolver-1.0.0.dmg
+          checksums.txt
+    
+    - name: Create release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          BitcoinPuzzleSolver-1.0.0.pkg
+          BitcoinPuzzleSolver-1.0.0.dmg
+          checksums.txt
+        body: |
+          ## Bitcoin Puzzle Solver ${{ github.ref_name }}
+          
+          ### 📥 Download Options
+          
+          **🎁 PKG Installer (Recommended - Easy!)**
+          - Double-click to install
+          - Automatically installs to Applications
+          - macOS native installer
+          - **Just works!**
+          
+          **💿 DMG Installer (Traditional)**
+          - Drag and drop installation
+          - Manual installation
+          - Works on all Macs
+          
+          Both installers work on **Intel and Apple Silicon Macs**!
+          
+          ### ✅ Requirements
+          - macOS 11.0 (Big Sur) or later
+          - Python 3.9+ (will prompt if not installed)
+          - 4GB RAM
+          
+          ### 🚀 Quick Start
+          1. Download PKG file
+          2. Double-click to install
+          3. Launch from Applications folder
+          4. That's it!
+          
+          Python dependencies install automatically on first launch.
+          
+          **Repository:** https://github.com/${{ github.repository }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
