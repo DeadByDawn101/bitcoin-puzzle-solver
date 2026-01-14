@@ -1,0 +1,93 @@
+name: Build Bitcoin Puzzle Solver DMG with BitCrack
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+  APP_NAME: 'BitcoinPuzzleSolver'
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Verify source files
+      run: |
+        test -d src && test -f src/gui.py || (echo "ERROR: src/gui.py not found" && exit 1)
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: pip install PyQt6 ecdsa base58 requests flask qrcode Pillow
+    
+    - name: Build BitCrack
+      continue-on-error: true
+      id: bitcrack
+      run: |
+        brew install cmake
+        git clone https://github.com/brichard19/BitCrack.git && cd BitCrack/build
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_OPENCL=ON
+        make -j$(sysctl -n hw.ncpu)
+        test -f clBitCrack && mkdir ../../bin && cp clBitCrack ../../bin/ && echo "OK=1" >> $GITHUB_OUTPUT
+    
+    - name: Setup BitCrack installer
+      run: |
+        mkdir -p installer
+        test -f scripts/Install-BitCrack.command && cp scripts/*.{command,txt} installer/ || echo "Using inline scripts"
+        test -f bin/clBitCrack && cp bin/clBitCrack installer/ || echo "No BitCrack binary"
+        test -f installer/Install-BitCrack.command && chmod +x installer/Install-BitCrack.command
+    
+    - name: Create app bundle
+      run: |
+        mkdir -p "build/$APP_NAME.app/Contents/MacOS" "build/$APP_NAME.app/Contents/Resources"
+        cp -r src/* "build/$APP_NAME.app/Contents/Resources/"
+        
+        echo '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>'$APP_NAME'</string><key>CFBundleIdentifier</key><string>com.btc.solver</string><key>CFBundleName</key><string>Bitcoin Puzzle Solver</string></dict></plist>' > "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        
+        echo '#!/bin/bash' > "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'cd "$(dirname "$0")/../Resources"' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'python3 -m pip install --user -q PyQt6 ecdsa base58 requests flask 2>/dev/null || true' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        echo 'python3 gui.py' >> "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+        
+        chmod +x "build/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+    
+    - name: Create DMG
+      run: |
+        mkdir dmg && cp -r "build/$APP_NAME.app" dmg/
+        test -d installer && cp -r installer dmg/BitCrack-Installer/
+        ln -s /Applications dmg/Applications
+        
+        echo "Bitcoin Puzzle Solver" > dmg/README.txt
+        echo "1. Drag app to Applications" >> dmg/README.txt
+        echo "2. Run BitCrack-Installer if available" >> dmg/README.txt
+        
+        VERSION=$(echo ${GITHUB_REF:-v1.0.0} | sed 's/refs\/tags\///')
+        hdiutil create -volname "Bitcoin Puzzle Solver" -srcfolder dmg -ov -format UDZO "$APP_NAME-$VERSION.dmg"
+        shasum -a 256 *.dmg > checksums.txt
+    
+    - name: Upload Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          *.dmg
+          checksums.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dmg-build
+        path: "*.dmg"
