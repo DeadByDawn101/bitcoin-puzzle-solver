@@ -1,0 +1,62 @@
+name: Build Bitcoin Puzzle Solver DMG
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install PyQt6 ecdsa base58 requests flask qrcode Pillow
+        brew install cmake create-dmg
+    
+    - name: Build BitCrack
+      run: |
+        git clone --depth 1 https://github.com/brichard19/BitCrack.git
+        cd BitCrack
+        mkdir build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_OPENCL=ON
+        make -j$(sysctl -n hw.ncpu)
+        mkdir -p ../../build/bin
+        cp clBitCrack ../../build/bin/
+    
+    - name: Create App Bundle
+      run: |
+        chmod +x scripts/create_app_bundle.sh
+        ./scripts/create_app_bundle.sh
+    
+    - name: Build DMG
+      run: |
+        chmod +x scripts/build_dmg.sh
+        VERSION=${GITHUB_REF#refs/tags/v}
+        ./scripts/build_dmg.sh
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          BitcoinPuzzleSolver-*.dmg
+          checksums.txt
+        body: |
+          ## Bitcoin Puzzle Solver
+          
+          Automated build from GitHub Actions.
+          
+          **Download**: BitcoinPuzzleSolver-macOS.dmg
+          
+          **Install**: Open DMG → Drag to Applications
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
